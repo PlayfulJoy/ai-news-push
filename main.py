@@ -385,6 +385,7 @@ def translate_to_zh(text: str) -> str:
 def build_email(articles: list) -> str:
     now = datetime.now(TZ)
     date_str = now.strftime("%Y年%m月%d日")
+    count = len(articles)
 
     sections = []
     for i, a in enumerate(articles, 1):
@@ -400,62 +401,66 @@ def build_email(articles: list) -> str:
         if len(summary) > 450:
             summary = summary[:420] + "……"
 
-        section = f"""        <tr>
-            <td style="padding:22px 18px;border-bottom:1px solid #f0f0f0;">
-                <div style="display:flex;align-items:flex-start;gap:12px;">
-                    <span style="flex-shrink:0;width:30px;height:30px;line-height:30px;
-                                 background:linear-gradient(135deg,#1677ff,#0958d9);
-                                 color:#fff;border-radius:8px;text-align:center;
-                                 font-size:14px;font-weight:bold;">{i}</span>
-                    <div style="flex:1;min-width:0;">
-                        <div style="font-size:16px;font-weight:700;color:#1a1a1a;
-                                    line-height:1.5;margin-bottom:10px;">
-                            {html.escape(title)}</div>"""
+        title_esc = html.escape(title)
+        source_esc = html.escape(source)
+        summary_esc = html.escape(summary) if summary else ""
+
+        sec = (
+            '<tr><td style="padding:22px 18px;border-bottom:1px solid #f0f0f0;">'
+            '<div style="display:flex;align-items:flex-start;gap:12px;">'
+            '<span style="flex-shrink:0;width:30px;height:30px;line-height:30px;'
+            'background:linear-gradient(135deg,#1677ff,#0958d9);'
+            'color:#fff;border-radius:8px;text-align:center;'
+            'font-size:14px;font-weight:bold;">' + str(i) + '</span>'
+            '<div style="flex:1;min-width:0;">'
+            '<div style="font-size:16px;font-weight:700;color:#1a1a1a;'
+            'line-height:1.5;margin-bottom:10px;">' + title_esc + '</div>'
+        )
         if summary:
-            section += f"""
-                        <div style="font-size:14px;color:#333;line-height:1.85;
-                                    text-align:justify;padding:12px 14px;
-                                    background:#f8f9ff;border-radius:8px;
-                                    border-left:3px solid #1677ff;">
-                            {html.escape(summary)}
-                        </div>"""
-        section += f"""
-                        <div style="margin-top:8px;font-size:12px;color:#999;">
-                            📰 来源：{html.escape(source)}</div>
-                    </div>
-                </div>
-            </td>
-        </tr>"""
-        sections.append(section)
+            sec += (
+                '<div style="font-size:14px;color:#333;line-height:1.85;'
+                'text-align:justify;padding:12px 14px;'
+                'background:#f8f9ff;border-radius:8px;'
+                'border-left:3px solid #1677ff;">'
+                + summary_esc + '</div>'
+            )
+        sec += (
+            '<div style="margin-top:8px;font-size:12px;color:#999;">'
+            + '📰 来源：' + source_esc + '</div>'
+            '</div></div></td></tr>'
+        )
+        sections.append(sec)
 
     if not sections:
-        sections.append("""        <tr><td style="padding:30px;text-align:center;
-            color:#999;font-size:14px;">
-            今日暂未获取到相关新闻，明天再来看看吧。</td></tr>"")
+        sections.append(
+            '<tr><td style="padding:30px;text-align:center;color:#999;font-size:14px;">'
+            '今日暂未获取到相关新闻，明天再来看看吧。</td></tr>'
+        )
 
-    return f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;padding:16px;background:#f5f6fa;
-             font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
-    <div style="max-width:680px;margin:0 auto;">
-        <div style="background:linear-gradient(135deg,#1677ff 0%,#0958d9 100%);
-                    padding:28px 22px;border-radius:14px 14px 0 0;">
-            <h1 style="color:#fff;margin:0;font-size:22px;font-weight:700;">
-                🤖 AI & 科技领域每日速递</h1>
-            <p style="color:rgba(255,255,255,0.85);margin:8px 0 0;font-size:13px;">
-                {date_str} · 聚焦 AI Coding / 具身智能 / 科技前沿 · 纯内容无外链</p>
-        </div>
-        <table style="width:100%;border-collapse:collapse;background:#fff;
-                      border-radius:0 0 14px 14px;
-                      box-shadow:0 2px 12px rgba(0,0,0,0.06);">
-            <tbody>
-{''.join(sections)}
-            </tbody>
-        </table>
-        <p style="color:#aaa;font-size:11px;text-align:center;margin-top:16px;">
-            由 GitHub Actions 自动生成 · 每日 08:00（北京时间）· 共 {len(articles)} 条</p>
-    </div>
-</body></html>"""
+    sections_html = "".join(sections)
+
+    email = (
+        '<!DOCTYPE html>'
+        '<html><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1"></head>'
+        '<body style="margin:0;padding:16px;background:#f5f6fa;'
+        'font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;">'
+        '<div style="max-width:680px;margin:0 auto;">'
+        '<div style="background:linear-gradient(135deg,#1677ff 0%,#0958d9 100%);'
+        'padding:28px 22px;border-radius:14px 14px 0 0;">'
+        '<h1 style="color:#fff;margin:0;font-size:22px;font-weight:700;">'
+        '🤖 AI & 科技领域每日速递</h1>'
+        '<p style="color:rgba(255,255,255,0.85);margin:8px 0 0;font-size:13px;">'
+        + date_str + ' · 聚焦 AI Coding / 具身智能 / 科技前沿 · 纯内容无外链</p>'
+        '</div>'
+        '<table style="width:100%;border-collapse:collapse;background:#fff;'
+        'border-radius:0 0 14px 14px;box-shadow:0 2px 12px rgba(0,0,0,0.06);">'
+        '<tbody>' + sections_html + '</tbody></table>'
+        '<p style="color:#aaa;font-size:11px;text-align:center;margin-top:16px;">'
+        '由 GitHub Actions 自动生成 · 每日 08:00（北京时间）· 共 ' + str(count) + ' 条</p>'
+        '</div></body></html>'
+    )
+    return email
 
 
 # ── email send ───────────────────────────────────────────────────

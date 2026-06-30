@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Daily AI News Push - GitHub Actions
-Fetches AI news, reads full article content, translates to Chinese,
-and sends a pure-text report email (NO links).
+Daily AI News Push – GitHub Actions
+Fetches AI news from direct tech media RSS feeds (rich descriptions),
+filters by AI coding + embodied intelligence, translates to Chinese,
+and sends a pure-content report email (NO links, NO redirect issues).
 """
 
 import os, re, sys, time, json, html
@@ -10,9 +11,8 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timezone, timedelta
-from urllib.request import Request, urlopen, HTTPRedirectHandler, build_opener
-from urllib.parse import quote, urlparse
-from http.client import HTTPResponse
+from urllib.request import Request, urlopen
+from urllib.parse import quote
 import ssl
 
 # ── config ──────────────────────────────────────────────────────
@@ -21,256 +21,166 @@ QQ_SMTP_CODE = os.environ["QQ_SMTP_CODE"]
 RECIPIENT    = os.environ.get("RECIPIENT", QQ_EMAIL)
 TZ           = timezone(timedelta(hours=8))
 
-QUERIES = [
-    ("AI coding agent tool development 2026", "AI编程"),
-    ("humanoid robot embodied intelligence",  "具身智能"),
-    ("large language model LLM release news",  "大模型"),
-    ("OpenAI Anthropic Google DeepMind AI",    "AI动态"),
+# Direct RSS feeds with rich article descriptions
+RSS_FEEDS = [
+    ("https://techcrunch.com/category/artificial-intelligence/feed/",       "TechCrunch"),
+    ("https://venturebeat.com/category/ai/feed/",                           "VentureBeat"),
+    ("https://feeds.arstechnica.com/arstechnica/index",                     "Ars Technica"),
+    ("https://www.artificialintelligence-news.com/feed/",                   "AI News"),
+    ("https://syncedreview.com/feed/",                                      "Synced"),
 ]
 
-BOOST_KW = [
-    "cursor","copilot","claude","gpt","gemini","grok",
-    "coding agent","ai agent","humanoid","embodied",
-    "robot","developer","tool","release","launch",
+# Also try Google News for discovery (keeps us aware of broader news)
+GOOGLE_QUERIES = [
+    ("AI coding agent tool 2026",        "AI编程"),
+    ("humanoid robot embodied 2026",     "具身智能"),
+    ("OpenAI Anthropic Google DeepMind", "AI巨头"),
 ]
 
-MAX_ARTICLES       = 5
-FETCH_TIMEOUT      = 12
-ARTICLE_TIMEOUT    = 12
-MAX_CONTENT_CHARS  = 800  # max raw content to fetch per article
-MAX_SUMMARY_CHARS  = 500  # max translated summary per article
+# Keywords for scoring relevance to our focus areas
+AI_CODING_KW = [
+    "coding agent","code generation","copilot","cursor","claude code",
+    "ai developer","code completion","gpt engineer","devin","windsurf",
+    "ai programming","code assistant","agentic coding","ai ide",
+    "github copilot","code review ai","ai code","codex",
+]
+EMBODIED_KW = [
+    "humanoid robot","embodied intelligence","robot learning",
+    "robotics","bipedal","humanoid","agibot","figure ai","tesla bot",
+    "optimus","unitree","boston dynamics","embodied ai",
+    "dexterous","manipulation","robot hand","locomotion",
+]
+GENERAL_AI_KW = [
+    "gpt","claude","gemini","grok","llama","mistral","deepseek",
+    "openai","anthropic","google deepmind","xai",
+    "large language model","transformer","foundation model",
+    "multi-modal","rag","agent","fine-tun","reinforcement learning",
+]
 
-UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+MAX_ARTICLES = 5
+FETCH_TIMEOUT = 15
+UA = "Mozilla/5.0 (compatible; NewsBot/1.0)"
 
-# ── RSS fetching ─────────────────────────────────────────────────
+# ── RSS fetcher ──────────────────────────────────────────────────
 
-def fetch_google_news_rss(query: str) -> list:
-    """Fetch Google News RSS, return list of {title, link, source, description}."""
-    url = (f"https://news.google.com/rss/search"
-           f"?q={quote(query)}&hl=en-US&gl=US&ceid=US:en")
+def fetch_rss(url: str, source_name: str) -> list:
+    """Fetch RSS and extract title + description."""
     req = Request(url, headers={"User-Agent": UA})
     try:
         ctx = ssl.create_default_context()
         with urlopen(req, timeout=FETCH_TIMEOUT, context=ctx) as resp:
             raw = resp.read()
     except Exception as e:
-        print(f"  [WARN] Google News RSS failed: {e}")
+        print(f"  [WARN] {source_name}: {e}")
         return []
 
     items = re.findall(r"<item>(.*?)</item>", raw.decode("utf-8", errors="replace"), re.DOTALL)
     articles = []
     for item_xml in items:
-        title_m  = re.search(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", item_xml, re.DOTALL)
-        link_m   = re.search(r"<link>(.*?)</link>", item_xml)
-        src_m    = re.search(r"<source[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</source>", item_xml, re.DOTALL)
-        desc_m   = re.search(r"<description>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</description>", item_xml, re.DOTALL)
+        title_m = re.search(r"<(?:title|media:title)[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</(?:title|media:title)>", item_xml, re.DOTALL)
+        desc_m  = re.search(r"<(?:description|content:encoded|media:description)[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</(?:description|content:encoded|media:description)>", item_xml, re.DOTALL)
+        link_m  = re.search(r"<link[^>]*>(.*?)</link>", item_xml)
+        # Some feeds use <link href="..."/> or atom:link
+        if not link_m:
+            link_m = re.search(r'<link[^>]+href=["\']([^"\']+)["\']', item_xml)
 
-        if not title_m or not link_m:
+        if not title_m:
             continue
 
-        title  = html.unescape(title_m.group(1).strip())
-        link   = link_m.group(1).strip()
-        source = html.unescape(src_m.group(1).strip()) if src_m else "Unknown"
-        desc   = html.unescape(desc_m.group(1).strip()) if desc_m else ""
-        # Clean HTML from description but keep important text
-        desc   = re.sub(r"<li>", "\n• ", desc)
-        desc   = re.sub(r"<br\s*/?>", "\n", desc)
-        desc   = re.sub(r"<[^>]+>", "", desc)
-        desc   = re.sub(r"\n\s*\n", "\n", desc)
-        desc   = re.sub(r"\s+", " ", desc).strip()
-        # Remove trailing " - SourceName" from title
-        title  = re.sub(r"\s+[-–|]\s+\S+$", "", title).strip()
-
-        if len(title) < 10:
-            continue
-
-        articles.append({
-            "title": title,
-            "link": link,
-            "source": source,
-            "description": desc,
-        })
-
-    return articles
-
-
-def fetch_hackernews() -> list:
-    """Fetch HN stories matching AI keywords."""
-    url = "https://hnrss.org/frontpage?q=AI+LLM+robot+coding+agent&count=15"
-    req = Request(url, headers={"User-Agent": UA})
-    try:
-        ctx = ssl.create_default_context()
-        with urlopen(req, timeout=FETCH_TIMEOUT, context=ctx) as resp:
-            raw = resp.read()
-    except Exception as e:
-        print(f"  [WARN] HN RSS failed: {e}")
-        return []
-
-    items = re.findall(r"<item>(.*?)</item>", raw.decode("utf-8", errors="replace"), re.DOTALL)
-    articles = []
-    for item_xml in items:
-        title_m = re.search(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", item_xml, re.DOTALL)
-        link_m  = re.search(r"<link>(.*?)</link>", item_xml)
-        desc_m  = re.search(r"<description>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</description>", item_xml, re.DOTALL)
-
-        if not title_m or not link_m:
-            continue
         title = html.unescape(title_m.group(1).strip())
-        link  = link_m.group(1).strip()
-        desc  = html.unescape(desc_m.group(1).strip()) if desc_m else ""
-        desc  = re.sub(r"<[^>]+>", "", desc).strip()
-        desc  = re.sub(r"\s+", " ", desc)
+        # Remove trailing source suffix
+        title = re.sub(r"\s+[-–|]\s+\S+$", "", title).strip()
+
+        desc = ""
+        if desc_m:
+            desc = html.unescape(desc_m.group(1).strip())
+            # Strip HTML tags
+            desc = re.sub(r"<li>", "\n• ", desc)
+            desc = re.sub(r"<br\s*/?>", "\n", desc)
+            desc = re.sub(r"<[^>]+>", " ", desc)
+            desc = re.sub(r"&[a-z]+;", " ", desc)
+            # Collapse whitespace
+            desc = re.sub(r"\s+", " ", desc).strip()
+            # Remove common junk patterns
+            desc = re.sub(r"©\s*\d{4}.*$", "", desc)
+            desc = re.sub(r"Read more\s*\.?$", "", desc, flags=re.IGNORECASE)
+            desc = re.sub(r"The post .*? appeared first on .*?\.?$", "", desc, flags=re.IGNORECASE)
+            desc = desc.strip()
 
         if len(title) < 10:
             continue
 
         articles.append({
             "title": title,
-            "link": link,
-            "source": "Hacker News",
-            "description": desc[:500],
+            "description": desc[:800],
+            "source": source_name,
         })
 
     return articles
 
 
-# ── article content extraction ───────────────────────────────────
+# ── scoring ──────────────────────────────────────────────────────
 
-class NoRedirectHandler(HTTPRedirectHandler):
-    """Intercept redirects so we can capture the final URL."""
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None  # Don't follow; we'll handle it manually
+def score_article(art: dict) -> float:
+    """Score relevance to AI coding + embodied intelligence."""
+    text = f"{art['title']} {art.get('description','')}".lower()
+    score = 0.0
 
+    # Base score from description length
+    desc_len = len(art.get("description", ""))
+    score += min(desc_len / 50.0, 6.0)  # up to 6pts for long descriptions
 
-def resolve_google_news_link(gn_link: str) -> str | None:
-    """Resolve a Google News RSS link to the real article URL.
-    
-    Google News links redirect through multiple hops. We follow them manually.
-    """
-    headers = {
-        "User-Agent": UA,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-    }
+    # AI Coding keywords
+    for kw in AI_CODING_KW:
+        if kw.lower() in text:
+            score += 4.0
+            break  # one match per category is enough
 
-    current_url = gn_link
-    for hop in range(5):
-        try:
-            ctx = ssl.create_default_context()
-            req = Request(current_url, headers=headers)
-            with urlopen(req, timeout=ARTICLE_TIMEOUT, context=ctx) as resp:
-                final_url = resp.geturl()
-                # If we got a 200 and the URL changed, we likely reached the real article
-                if final_url != current_url and "news.google.com" not in final_url:
-                    return final_url
-                # If still on google, look for redirect in HTML
-                raw = resp.read().decode("utf-8", errors="replace")
-                # Check for meta refresh or JS redirect
-                meta = re.search(r'<meta[^>]+http-equiv=["\']refresh["\'][^>]+url=([^"\'>\s]+)', raw, re.IGNORECASE)
-                js   = re.search(r'window\.location\s*=\s*["\']([^"\']+)["\']', raw)
-                link  = re.search(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>.*?here.*?</a>', raw, re.IGNORECASE)
-
-                if meta:
-                    current_url = meta.group(1)
-                elif js:
-                    current_url = js.group(1)
-                elif link and "news.google.com" not in link.group(1):
-                    return link.group(1)
-                else:
-                    return final_url if "news.google.com" not in final_url else None
-
-        except Exception as e:
-            print(f"    [resolve hop={hop}] {e}")
-            if hop == 0:
-                return None
+    # Embodied intelligence keywords
+    for kw in EMBODIED_KW:
+        if kw.lower() in text:
+            score += 4.0
             break
 
-    return None
+    # General AI keywords
+    match_count = 0
+    for kw in GENERAL_AI_KW:
+        if kw.lower() in text:
+            match_count += 1
+    score += min(match_count, 4) * 1.5  # up to 6pts
 
-
-def extract_article_text(html_text: str) -> str:
-    """Extract meaningful text content from article HTML."""
-    # Remove non-content elements
-    for tag in ["script","style","nav","header","footer","aside","noscript",
-                "iframe","form","button","figure","figcaption","svg","time"]:
-        html_text = re.sub(
-            rf"<\s*{tag}[^>]*>.*?</\s*{tag}\s*>",
-            " ", html_text,
-            flags=re.DOTALL | re.IGNORECASE
-        )
-
-    # Try to find article body first
-    article_match = re.search(
-        r'<(?:article|main|div)\s[^>]*\b(?:article|content|post|story)[^>]*>(.*?)</(?:article|main|div)\s*>',
-        html_text, re.DOTALL | re.IGNORECASE
-    )
-
-    target = article_match.group(1) if article_match else html_text
-
-    # Extract paragraphs
-    paragraphs = re.findall(r"<\s*p[^>]*>(.*?)</\s*p\s*>", target, re.DOTALL)
-    if not paragraphs:
-        # fallback: strip all tags from target
-        text = re.sub(r"<\s*[^>]+>", " ", target)
-        text = re.sub(r"\s+", " ", text).strip()
-        return text[:2000]
-
-    lines = []
-    total_chars = 0
-    for p in paragraphs:
-        clean = re.sub(r"<\s*[^>]+>", "", p).strip()
-        clean = html.unescape(clean)
-        clean = re.sub(r"\s+", " ", clean)
-        if len(clean) < 12:  # skip very short lines (nav items etc)
-            continue
-        lines.append(clean)
-        total_chars += len(clean)
-        if total_chars > 2500:
+    # Bonus for title mentioning our focus areas
+    title_lower = art["title"].lower()
+    for kw in ["coding","programming","code","developer","agent"]:
+        if kw in title_lower:
+            score += 2.0
+            break
+    for kw in ["robot","humanoid","embodied","bipedal"]:
+        if kw in title_lower:
+            score += 2.0
             break
 
-    return "\n\n".join(lines) if lines else ""
+    return score
 
 
-def fetch_article_content(gn_link: str) -> str | None:
-    """Resolve Google News link and fetch the full article text."""
-    real_url = resolve_google_news_link(gn_link)
-    if not real_url:
-        return None
-
-    print(f"      → resolved: {urlparse(real_url).netloc}")
-    try:
-        ctx = ssl.create_default_context()
-        req = Request(real_url, headers={
-            "User-Agent": UA,
-            "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Accept-Encoding": "gzip, deflate",
-        })
-        with urlopen(req, timeout=ARTICLE_TIMEOUT, context=ctx) as resp:
-            raw = resp.read()
-            # Handle gzip
-            if resp.headers.get("Content-Encoding") == "gzip":
-                import gzip
-                raw = gzip.decompress(raw)
-            html_str = raw.decode("utf-8", errors="replace")
-
-        text = extract_article_text(html_str)
-        return text if text and len(text) > 30 else None
-
-    except Exception as e:
-        print(f"      [fetch ERR] {e}")
-        return None
+def deduplicate(articles: list) -> list:
+    seen = set()
+    out = []
+    for a in articles:
+        key = re.sub(r"[^\w]", "", a["title"].lower())[:40]
+        if key and key not in seen:
+            seen.add(key)
+            out.append(a)
+    return out
 
 
 # ── translation ──────────────────────────────────────────────────
 
 def translate_to_zh(text: str) -> str:
-    """Translate text to Chinese via Google Translate API."""
+    """Translate to Chinese via Google Translate."""
     if not text or len(text.strip()) < 5:
         return text
 
-    # Split into manageable chunks
     chunks = []
     remaining = text.strip()
     while remaining:
@@ -299,37 +209,12 @@ def translate_to_zh(text: str) -> str:
         except Exception as e:
             print(f"    [TL WARN] {e}")
             results.append(chunk)
-        time.sleep(0.2)
+        time.sleep(0.15)
 
     return "".join(results)
 
 
-# ── scoring & selection ──────────────────────────────────────────
-
-def score_article(art: dict) -> float:
-    text = (art["title"] + " " + art.get("description", "")).lower()
-    score = 0.0
-    # Prefer articles with substantial descriptions
-    desc_len = len(art.get("description", ""))
-    score += min(desc_len / 20.0, 5.0)
-    for kw in BOOST_KW:
-        if kw.lower() in text:
-            score += 2.5
-    return score
-
-
-def deduplicate(articles: list) -> list:
-    seen = set()
-    out = []
-    for a in articles:
-        key = a["title"].lower()[:50]
-        if key not in seen:
-            seen.add(key)
-            out.append(a)
-    return out
-
-
-# ── email builder (pure content, NO links) ───────────────────────
+# ── email builder (NO LINKS, pure content) ───────────────────────
 
 def build_email(articles: list) -> str:
     now = datetime.now(TZ)
@@ -338,8 +223,12 @@ def build_email(articles: list) -> str:
     sections = []
     for i, a in enumerate(articles, 1):
         title   = a.get("title_zh") or a["title"]
-        summary = a.get("summary_zh") or a.get("summary") or ""
+        summary = a.get("summary_zh") or a.get("description", "")
         source  = a.get("source", "")
+
+        # Clean up summary: remove sentences that are just boilerplate
+        summary = re.sub(r"©\s*\d{4}.*$", "", summary)
+        summary = summary.strip()
 
         section = f"""        <tr>
             <td style="padding:22px 18px;border-bottom:1px solid #f0f0f0;">
@@ -362,7 +251,7 @@ def build_email(articles: list) -> str:
                         </div>"""
         section += f"""
                         <div style="margin-top:8px;font-size:12px;color:#999;">
-                            📰 {html.escape(source)}</div>
+                            📰 来源：{html.escape(source)}</div>
                     </div>
                 </div>
             </td>
@@ -384,7 +273,7 @@ def build_email(articles: list) -> str:
             <h1 style="color:#fff;margin:0;font-size:22px;font-weight:700;">
                 🤖 AI 领域每日速递</h1>
             <p style="color:rgba(255,255,255,0.85);margin:8px 0 0;font-size:13px;">
-                {date_str} · 聚焦 AI Coding 与具身智能 · 中文内容摘要</p>
+                {date_str} · 聚焦 AI Coding 与具身智能 · 纯内容无外链</p>
         </div>
         <table style="width:100%;border-collapse:collapse;background:#fff;
                       border-radius:0 0 14px 14px;
@@ -394,7 +283,7 @@ def build_email(articles: list) -> str:
             </tbody>
         </table>
         <p style="color:#aaa;font-size:11px;text-align:center;margin-top:16px;">
-            由 GitHub Actions 自动生成 · 每日 08:00（北京时间）· 纯内容无链接</p>
+            由 GitHub Actions 自动生成 · 每日 08:00（北京时间）</p>
     </div>
 </body></html>"""
 
@@ -420,81 +309,67 @@ def send_email(html_content: str):
 
 def main():
     print("=" * 56)
-    print("  Daily AI News Push — Full Content Edition")
+    print("  Daily AI News Push — Direct RSS Edition")
     print(f"  {datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')} (Beijing)")
     print("=" * 56)
 
-    # ── Phase 1: Collect candidates ──
-    print("\n[1/5] Fetching headlines from Google News + HN ...")
+    # ── Phase 1: Collect from direct RSS feeds ──
+    print("\n[1/4] Fetching from direct RSS feeds ...")
     all_arts = []
-    for query, label in QUERIES:
-        print(f"  - {label}")
-        arts = fetch_google_news_rss(query)
-        print(f"    → {len(arts)} articles")
+    for feed_url, name in RSS_FEEDS:
+        print(f"  - {name}: {feed_url[:50]}...")
+        arts = fetch_rss(feed_url, name)
         for a in arts:
             a["score"] = score_article(a)
         all_arts.extend(arts)
-        time.sleep(0.6)
-
-    print("  - Hacker News")
-    hn_arts = fetch_hackernews()
-    print(f"    → {len(hn_arts)} articles")
-    for a in hn_arts:
-        a["score"] = score_article(a)
-    all_arts.extend(hn_arts)
-
-    all_arts = deduplicate(all_arts)
-    all_arts.sort(key=lambda a: a.get("score", 0), reverse=True)
-    candidates = all_arts[:MAX_ARTICLES]
-
-    if not candidates:
-        print("  [FATAL] No articles. Sending fallback.")
-        send_email(build_email([]))
-        return
-
-    print(f"  Selected {len(candidates)} from {len(all_arts)} total")
-    for c in candidates:
-        print(f"    • [{c['source']}] {c['title'][:55]}... (desc:{len(c.get('description',''))}ch)")
-
-    # ── Phase 2: Fetch full content ──
-    print(f"\n[2/5] Fetching full article content ...")
-    enriched = []
-    for i, art in enumerate(candidates):
-        print(f"  [{i+1}/{len(candidates)}] {art['title'][:50]}...")
-        content = fetch_article_content(art["link"])
-        if content and len(content) > 60:
-            art["summary"] = content[:MAX_CONTENT_CHARS]
-            print(f"      → Got {len(content)} chars of article text")
-        elif art.get("description") and len(art["description"]) > 30:
-            art["summary"] = art["description"][:400]
-            print(f"      → Using RSS description ({len(art['summary'])} chars)")
-        else:
-            art["summary"] = ""
-            print(f"      → No content available")
-        enriched.append(art)
+        print(f"    → {len(arts)} articles")
         time.sleep(0.5)
 
-    # ── Phase 3: Translate ──
-    print(f"\n[3/5] Translating to Chinese ...")
-    for i, art in enumerate(enriched):
-        prefix = f"  [{i+1}/{len(enriched)}]"
-        print(f"{prefix} TL title: {art['title'][:40]}...")
-        art["title_zh"] = translate_to_zh(art["title"])
-        time.sleep(0.4)
+    total_pre_dedup = len(all_arts)
+    all_arts = deduplicate(all_arts)
+    all_arts.sort(key=lambda a: a.get("score", 0), reverse=True)
 
-        summary = art.get("summary", "")
-        if summary and len(summary) > 20:
-            print(f"{prefix} TL summary ({len(summary)} chars)")
-            art["summary_zh"] = translate_to_zh(summary)
+    # Top candidates
+    candidates = []
+    for a in all_arts:
+        if a["score"] > 3.0:  # minimum relevance threshold
+            candidates.append(a)
+        if len(candidates) >= MAX_ARTICLES:
+            break
+
+    if not candidates:
+        print("  No relevant articles found. Using top scored ones.")
+        candidates = all_arts[:MAX_ARTICLES]
+
+    print(f"  Selected {len(candidates)} from {total_pre_dedup} total ({len(all_arts)} unique)")
+    for c in candidates:
+        print(f"    [{c['source']}] score={c['score']:.1f} | {c['title'][:55]}")
+
+    # ── Phase 2: Translate ──
+    print(f"\n[2/4] Translating to Chinese ...")
+    for i, art in enumerate(candidates):
+        prefix = f"  [{i+1}/{len(candidates)}]"
+
+        print(f"{prefix} Title: {art['title'][:40]}...")
+        art["title_zh"] = translate_to_zh(art["title"])
+        time.sleep(0.3)
+
+        desc = art.get("description", "")
+        if desc and len(desc) > 30:
+            # Take first ~400 chars of description for translation
+            summary_text = desc[:450]
+            print(f"{prefix} Summary ({len(summary_text)} chars)")
+            art["summary_zh"] = translate_to_zh(summary_text)
             time.sleep(0.5)
         else:
-            art["summary_zh"] = summary
+            art["summary_zh"] = ""
 
-    # ── Phase 4+5: Build & send ──
-    print(f"\n[4/5] Building email ...")
-    email_html = build_email(enriched)
+    # ── Phase 3: Build email ──
+    print(f"\n[3/4] Building email ...")
+    email_html = build_email(candidates)
 
-    print(f"\n[5/5] Sending ...")
+    # ── Phase 4: Send ──
+    print(f"\n[4/4] Sending ...")
     send_email(email_html)
     print("\n✓ All done!")
 

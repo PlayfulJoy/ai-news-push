@@ -77,7 +77,7 @@ MAX_ARTICLES = 8
 FETCH_TIMEOUT = 20
 ARTICLE_FETCH_TIMEOUT = 12
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0.0.0"
-TARGET_SUMMARY_CHARS = 600  # ~300 Chinese chars after translation
+TARGET_SUMMARY_CHARS = 1000  # ~300-400 Chinese chars after translation
 
 # ── RSS / JSON fetcher ──────────────────────────────────────────
 
@@ -393,13 +393,21 @@ def build_email(articles: list) -> str:
         summary = a.get("summary_zh") or a.get("description", "")
         source  = a.get("source", "")
 
-        # Clean up summary
+        # Clean up summary: remove boilerplate endings
         summary = re.sub(r"©\s*\d{4}.*$", "", summary)
         summary = summary.strip()
 
-        # Truncate to ~300 Chinese characters if too long
-        if len(summary) > 450:
-            summary = summary[:420] + "……"
+        # Ensure summary ends at a sentence boundary (not mid-sentence)
+        # If too long, truncate at the last sentence-ending punctuation
+        if len(summary) > 400:
+            # Find last sentence end (。！？.!? period) before char 400
+            cut_pos = 400
+            for punct in ['。', '！', '？', '.', '!', '?']:
+                idx = summary.rfind(punct, 200, 400)
+                if idx > 0:
+                    cut_pos = idx + 1
+                    break
+            summary = summary[:cut_pos]
 
         title_esc = html.escape(title)
         source_esc = html.escape(source)

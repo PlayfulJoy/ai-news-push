@@ -1,0 +1,3 @@
+# Daily AI News Push – Dependencies
+# No external packages needed – uses Python stdlib only
+# (urllib, smtplib, email, xml.etree, datetime)

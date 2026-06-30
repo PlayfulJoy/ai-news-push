@@ -44,32 +44,30 @@ TZ = timezone(timedelta(hours=8))  # Beijing time
 
 # ── helpers ─────────────────────────────────────────────────────
 
-def fetch_google_news(query: str, count: int = 10) -> list[dict]:
-    """Fetch news articles from Google News RSS."""
-    url = f"https://news.google.com/rss/search?q={quote(query)}&hl=en-US&gl=US&ceid=US:en&num={count}"
+def fetch_rss(url: str, label: str, timeout: int = 15) -> list[dict]:
+    """Generic RSS feed fetcher."""
     req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
-        with urlopen(req, timeout=15) as resp:
+        with urlopen(req, timeout=timeout) as resp:
             tree = ET.parse(resp)
     except Exception as e:
-        print(f"  [WARN] Google News fetch failed for '{query}': {e}")
+        print(f"  [WARN] RSS fetch failed for '{label}': {e}")
         return []
 
     articles = []
     for item in tree.iter("item"):
-        title = item.find("title")
-        link = item.find("link")
-        pubdate = item.find("pubDate")
-        source = item.find("source")
+        title_el = item.find("title")
+        link_el = item.find("link")
+        source_el = item.find("source")
 
-        title_str = title.text if title is not None else ""
-        link_str = link.text if link is not None else ""
-        source_str = source.text if source is not None else ""
+        title_str = (title_el.text or "").strip()
+        link_str = (link_el.text or "").strip()
+        source_str = (source_el.text or "").strip() if source_el is not None else label
 
-        # Google News titles have " - Source" suffix
+        # Clean Google News " - Source" suffix
         title_str = re.sub(r"\s*-\s*\S+$", "", title_str).strip()
 
-        if not title_str or len(title_str) < 10:
+        if not title_str or len(title_str) < 8:
             continue
 
         articles.append({
@@ -78,6 +76,63 @@ def fetch_google_news(query: str, count: int = 10) -> list[dict]:
             "source": source_str,
         })
 
+    return articles
+
+
+def fetch_google_news(query: str, count: int = 10) -> list[dict]:
+    """Fetch news articles from Google News RSS."""
+    url = f"https://news.google.com/rss/search?q={quote(query)}&hl=en-US&gl=US&ceid=US:en&num={count}"
+    return fetch_rss(url, f"Google/{query}")
+
+
+def fetch_hackernews() -> list[dict]:
+    """Fetch top stories from Hacker News (AI-related)."""
+    articles = []
+    try:
+        req = Request("https://hnrss.org/newest?q=AI+LLM+robot+coding+agent",
+                      headers={"User-Agent": "Mozilla/5.0"})
+        with urlopen(req, timeout=15) as resp:
+            tree = ET.parse(resp)
+        for item in tree.iter("item"):
+            title_el = item.find("title")
+            link_el = item.find("link")
+            title_str = (title_el.text or "").strip()
+            link_str = (link_el.text or "").strip()
+            if title_str and len(title_str) >= 8:
+                articles.append({
+                    "title": title_str,
+                    "link": link_str,
+                    "source": "Hacker News",
+                })
+    except Exception as e:
+        print(f"  [WARN] Hacker News fetch failed: {e}")
+    return articles
+
+
+def fetch_techmeme() -> list[dict]:
+    """Fetch AI-related articles from Techmeme RSS."""
+    articles = []
+    try:
+        req = Request("https://www.techmeme.com/rss.xml",
+                      headers={"User-Agent": "Mozilla/5.0"})
+        with urlopen(req, timeout=15) as resp:
+            tree = ET.parse(resp)
+        for item in tree.iter("item"):
+            title_el = item.find("title")
+            link_el = item.find("link")
+            title_str = (title_el.text or "").strip()
+            link_str = (link_el.text or "").strip()
+            # Techmeme titles sometimes contain " — " separator
+            if " — " in title_str:
+                title_str = title_str.split(" — ")[0].strip()
+            if title_str and len(title_str) >= 8:
+                articles.append({
+                    "title": title_str,
+                    "link": link_str,
+                    "source": "Techmeme",
+                })
+    except Exception as e:
+        print(f"  [WARN] Techmeme fetch failed: {e}")
     return articles
 
 
@@ -119,21 +174,37 @@ def deduplicate(articles: list[dict]) -> list[dict]:
 
 
 def fetch_all_news() -> list[dict]:
-    """Fetch news from all queries, score, and return top results."""
+    """Fetch news from all sources, score, and return top results."""
     all_articles = []
+
+    # 1. Google News (may timeout in China, but works in GitHub Actions US runners)
     for query, label in QUERIES:
         print(f"  fetching: {label}")
         articles = fetch_google_news(query, count=10)
         for a in articles:
             a["score"] = score_article(a)
         all_articles.extend(articles)
-        time.sleep(1)  # be polite
+        time.sleep(1)
+
+    # 2. Hacker News (works globally)
+    print("  fetching: Hacker News")
+    articles = fetch_hackernews()
+    for a in articles:
+        a["score"] = score_article(a)
+    all_articles.extend(articles)
+
+    # 3. Techmeme (tech news aggregator, works in US)
+    print("  fetching: Techmeme")
+    articles = fetch_techmeme()
+    for a in articles:
+        a["score"] = score_article(a)
+    all_articles.extend(articles)
 
     # deduplicate
     all_articles = deduplicate(all_articles)
 
     # sort by score desc, take top
-    all_articles.sort(key=lambda a: a["score"], reverse=True)
+    all_articles.sort(key=lambda a: a.get("score", 0), reverse=True)
     return all_articles[:MAX_RESULTS]
 
 
@@ -211,11 +282,12 @@ def main():
             "title": "今日暂未抓取到 AI 相关新闻，请稍后手动查看。",
             "link": "https://news.google.com/search?q=AI",
             "source": "Google News",
+            "score": 0.0,
         }]
 
     print(f"  got {len(articles)} articles\n")
     for a in articles:
-        print(f"    [{a['score']:.1f}] {a['title']}")
+        print(f"    [{a.get('score', 0):.1f}] {a['title']}")
 
     print("\n[2/3] Building email ...")
     html = build_email_html(articles)

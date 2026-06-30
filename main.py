@@ -466,7 +466,7 @@ def build_email(articles: list) -> str:
 # ── email send ───────────────────────────────────────────────────
 
 def send_email(html_content: str):
-    msg = MIMultipart("alternative")
+    msg = MIMEMultipart("alternative")
     now = datetime.now(TZ)
     msg["Subject"] = f"🤖 AI & 科技速递 | {now.strftime('%m/%d')} · {MAX_ARTICLES}条精选"
     msg["From"] = QQ_EMAIL

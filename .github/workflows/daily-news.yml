@@ -1,0 +1,20 @@
+name: Daily AI News Push
+
+on:
+  schedule:
+    - cron: '0 14 * * *'   # UTC 14:00 = Beijing 22:00
+  workflow_dispatch:         # manual trigger
+
+jobs:
+  push-news:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: python main.py
+        env:
+          QQ_EMAIL: ${{ secrets.QQ_EMAIL }}
+          QQ_SMTP_CODE: ${{ secrets.QQ_SMTP_CODE }}
